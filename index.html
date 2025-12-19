@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stark Cosmic Encyclopedia</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', monospace; }
+        
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+        
+        .hud-panel {
+            position: absolute; border: 1px solid rgba(0, 255, 255, 0.2); background: rgba(0, 10, 20, 0.8);
+            padding: 15px; backdrop-filter: blur(4px); color: #00ffff;
+        }
+        .top-left { top: 20px; left: 20px; border-left: 4px solid #00ffff; }
+        .bottom-right { bottom: 20px; right: 20px; text-align: right; border-right: 4px solid #00ffff; }
+
+        h2 { margin: 0; font-size: 20px; letter-spacing: 2px; text-transform: uppercase; text-shadow: 0 0 10px rgba(0, 255, 255, 0.5); }
+        .sub { font-size: 12px; color: #888; margin-top: 5px; }
+        .data { font-size: 10px; color: #aaa; margin-top: 10px; font-family: monospace; }
+        
+        /* Camera */
+        #cam-view {
+            position: absolute; bottom: 20px; left: 20px; width: 200px; height: 150px;
+            border: 1px solid #333; opacity: 0.4; transform: scaleX(-1); z-index: 5;
+        }
+        #video-input { width: 100%; height: 100%; object-fit: cover; }
+
+        #loader {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #00ffff; font-size: 20px; letter-spacing: 4px; animation: flash 1s infinite;
+        }
+        @keyframes flash { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="hud-panel top-left">
+            <h2 id="object-name">INIT</h2>
+            <div class="sub" id="object-desc">System Loading...</div>
+            <div class="data">
+                VELOCITY: <span id="vel-readout">0.00</span><br>
+                PARTICLES: 28,000<br>
+                MODE: STABLE PHYSICS
+            </div>
+        </div>
+        <div class="hud-panel bottom-right">
+            <h2>CONTROLS</h2>
+            <div class="sub">1 HAND: Rotate</div>
+            <div class="sub">2 HANDS: Zoom</div>
+            <div class="sub" style="color:#ff0055">PINCH & FLICK: Next</div>
+        </div>
+    </div>
+
+    <div id="loader">LOADING COSMOS...</div>
+    <div id="cam-view"><video id="video-input" playsinline></video></div>
+    <div id="canvas-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+    <script>
+        // --- CONFIG ---
+        const PARTICLE_COUNT = 28000;
+        const FRICTION = 0.96;
+        const SENSITIVITY = 0.05;
+
+        // --- THREE.JS ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.01);
+
+        const camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.position.z = 60;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.toneMapping = THREE.ReinhardToneMapping;
+        container.appendChild(renderer.domElement);
+
+        // --- PARTICLE SYSTEM ---
+        const geometry = new THREE.BufferGeometry();
+        const pos = new Float32Array(PARTICLE_COUNT*3);
+        const col = new Float32Array(PARTICLE_COUNT*3);
+        const targetPos = new Float32Array(PARTICLE_COUNT*3);
+        const targetCol = new Float32Array(PARTICLE_COUNT*3);
+
+        // Init
+        for(let i=0; i<PARTICLE_COUNT*3; i++) {
+            pos[i] = (Math.random()-0.5)*100;
+            targetPos[i] = pos[i];
+            col[i] = 1; targetCol[i] = 1;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+
+        // High Quality Glow Texture
+        const getTex = () => {
+            const c = document.createElement('canvas'); c.width=64; c.height=64;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(32,32,0,32,32,32);
+            g.addColorStop(0,'rgba(255,255,255,1)');
+            g.addColorStop(0.2,'rgba(255,255,255,0.8)');
+            g.addColorStop(0.5,'rgba(255,255,255,0.2)');
+            g.addColorStop(1,'transparent');
+            ctx.fillStyle=g; ctx.fillRect(0,0,64,64);
+            return new THREE.Texture(c);
+        };
+        const mat = new THREE.PointsMaterial({
+            size: 0.6, map: getTex(), vertexColors: true, 
+            blending: THREE.AdditiveBlending, depthWrite: false, transparent: true
+        });
+        mat.map.needsUpdate = true;
+
+        const universe = new THREE.Group();
+        universe.add(new THREE.Points(geometry, mat));
+        scene.add(universe);
+
+        // --- SCIENTIFIC PATTERNS ---
+        let pIdx = 0;
+        function resetIdx() { pIdx = 0; }
+        
+        // Helper: Set target position and color
+        function setT(i, x, y, z, r=1, g=1, b=1) {
+            const idx = i*3;
+            targetPos[idx] = x;
+            targetPos[idx+1] = y;
+            targetPos[idx+2] = z;
+            targetCol[idx] = r;
+            targetCol[idx+1] = g;
+            targetCol[idx+2] = b;
+        }
+        
+        // Helper: Add Cloud/Cluster
+        function addCluster(count, cx, cy, cz, spread, r, g, b) {
+            for(let i=0; i<count; i++) {
+                if(pIdx>=PARTICLE_COUNT) break;
+                const idx = pIdx*3;
+                targetPos[idx] = cx + (Math.random()-0.5)*spread;
+                targetPos[idx+1] = cy + (Math.random()-0.5)*spread;
+                targetPos[idx+2] = cz + (Math.random()-0.5)*spread;
+                targetCol[idx]=r; targetCol[idx+1]=g; targetCol[idx+2]=b;
+                pIdx++;
+            }
+        }
+
+        // Helper: Add Orbital Body
+        function addOrb(cx, cy, cz, radius, count, r, g, b) {
+            for(let i=0; i<count; i++) {
+                if(pIdx>=PARTICLE_COUNT) break;
+                const idx = pIdx*3;
+                const angle = Math.random() * Math.PI * 2;
+                const dist = Math.random() * radius;
+                targetPos[idx] = cx + Math.cos(angle) * dist;
+                targetPos[idx+1] = cy + (Math.random()-0.5) * (radius * 0.1);
+                targetPos[idx+2] = cz + Math.sin(angle) * dist;
+                targetCol[idx]=r; targetCol[idx+1]=g; targetCol[idx+2]=b;
+                pIdx++;
+            }
+        }
+
+        const Patterns = {
+            // --- FULL 3D SOLAR SYSTEM ---
+'SOLAR SYSTEM': {
+    desc: 'Our Planetary System (Fully 3D spheres + 3D rings)',
+    gen: () => {
+        pIdx = 0;
+
+        // Helper: Add a sphere of particles
+        function addOrbSphere(cx, cy, cz, radius, count, r, g, b) {
+            for (let i = 0; i < count && pIdx < PARTICLE_COUNT; i++) {
+                // Random point on a sphere (uniform distribution)
+                const u = Math.random();
+                const v = Math.random();
+                const theta = 2 * Math.PI * u;
+                const phi = Math.acos(2 * v - 1);
+
+                const x = cx + radius * Math.sin(phi) * Math.cos(theta);
+                const y = cy + radius * Math.sin(phi) * Math.sin(theta);
+                const z = cz + radius * Math.cos(phi);
+
+                const idx = pIdx * 3;
+                targetPos[idx]     = x;
+                targetPos[idx + 1] = y;
+                targetPos[idx + 2] = z;
+
+                targetCol[idx]     = r;
+                targetCol[idx + 1] = g;
+                targetCol[idx + 2] = b;
+
+                pIdx++;
+            }
+        }
+
+        // --- SUN ---
+        addOrbSphere(0, 0, 0, 6, 10000, 1.0, 0.8, 0.2);
+
+        // --- PLANETS ---
+        addOrbSphere(10, 0, 0, 0.8, 500, 0.5, 0.5, 0.5);   // Mercury
+        addOrbSphere(15, 0, 5, 1.2, 800, 1.0, 0.6, 0.2);   // Venus
+        addOrbSphere(22, 0, -5, 1.5, 1200, 0.2, 0.6, 1.0); // Earth
+        addOrbSphere(30, 0, 8, 1.1, 800, 1.0, 0.2, 0.1);   // Mars
+        addOrbSphere(45, 0, -15, 4.0, 2500, 0.9, 0.7, 0.5); // Jupiter
+        addOrbSphere(-40, 0, 20, 3.5, 2000, 0.9, 0.8, 0.3); // Saturn
+
+        // --- SATURN RINGS (tilted disk) ---
+const saturnX = -40;
+const saturnY = 0;  // Saturn center Y
+const saturnZ = 20; // Saturn center Z
+const ringTilt = 0.35;
+
+for (let k = 0; k < 1500 && pIdx < PARTICLE_COUNT; k++) {
+    const a = Math.random() * 2 * Math.PI;
+    const r = 5 + Math.random() * 4;
+
+    // Local ring coordinates relative to Saturn
+    let x = Math.cos(a) * r;
+    let y = (Math.random() - 0.5) * 0.5; // thickness
+    let z = Math.sin(a) * r;
+
+    // Rotate around X axis to tilt the ring
+    const yTilt = y * Math.cos(ringTilt) - z * Math.sin(ringTilt);
+    const zTilt = y * Math.sin(ringTilt) + z * Math.cos(ringTilt);
+
+    const idx = pIdx * 3;
+    targetPos[idx]     = saturnX + x;
+    targetPos[idx + 1] = saturnY + yTilt;
+    targetPos[idx + 2] = saturnZ + zTilt;
+
+    targetCol[idx]     = 0.8;
+    targetCol[idx + 1] = 0.8;
+    targetCol[idx + 2] = 0.6;
+
+    pIdx++;
+}
+
+
+        // --- BACKGROUND STARS ---
+        while (pIdx < PARTICLE_COUNT) {
+            const idx = pIdx * 3;
+            targetPos[idx]     = (Math.random() - 0.5) * 200;
+            targetPos[idx + 1] = (Math.random() - 0.5) * 200;
+            targetPos[idx + 2] = (Math.random() - 0.5) * 200;
+
+            targetCol[idx] = 1;
+            targetCol[idx + 1] = 1;
+            targetCol[idx + 2] = 1;
+
+            pIdx++;
+        }
+    }
+},
+
+            'GALAXY SPIRAL': {
+                desc: 'Spiral Galaxy Arms',
+                gen: () => {
+                    pIdx = 0;
+                    const arms = 5;
+                    for(let i=0; i<PARTICLE_COUNT; i++) {
+                        const r = Math.pow(Math.random(), 1.5) * 40;
+                        const a = r*0.5 + (i%arms)*(Math.PI*2/arms);
+                        const spread = (Math.random()-0.5)*(r*0.2);
+                        
+                        const idx = i*3;
+                        targetPos[idx] = (r*Math.cos(a)) + spread;
+                        targetPos[idx+1] = (Math.random()-0.5)*(100/(r+1));
+                        targetPos[idx+2] = (r*Math.sin(a)) + spread;
+                        
+                        const col = r < 5 ? [1,1,0.8] : [0.2,0.5,1];
+                        targetCol[idx]=col[0]; targetCol[idx+1]=col[1]; targetCol[idx+2]=col[2];
+                    }
+                }
+            },
+
+            
+            'TORUS': {
+    desc: 'Donut-Shaped Particle Ring',
+    gen: () => {
+        const R = 15; // major radius
+        const r = 5;  // minor radius
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const u = Math.random() * Math.PI * 2;
+            const v = Math.random() * Math.PI * 2;
+
+            const x = (R + r * Math.cos(v)) * Math.cos(u);
+            const y = (R + r * Math.cos(v)) * Math.sin(u);
+            const z = r * Math.sin(v);
+
+            setT(
+                i,
+                x,
+                y,
+                z,
+                1, 0.6, 0.2 // warm torus color (change if needed)
+            );
+        }
+    }
+},
+
+
+'SPHERE1': {
+    desc: 'Evenly Distributed Particle Sphere with multicolor (optimized)',
+    gen: () => {
+        const r = 15;
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+            const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+
+            const x = r * Math.cos(theta) * Math.sin(phi);
+            const y = r * Math.sin(theta) * Math.sin(phi);
+            const z = r * Math.cos(phi);
+
+            // Rainbow colors (HSV → RGB) optimized inline
+            const h = i / PARTICLE_COUNT; // hue 0 → 1
+            const s = 1;
+            const v = 1;
+
+            const hi = Math.floor(h * 6);
+            const f = h * 6 - hi;
+            const p = v * (1 - s);
+            const q = v * (1 - f * s);
+            const t = v * (1 - (1 - f) * s);
+
+            let rCol, gCol, bCol;
+            switch(hi % 6) {
+                case 0: rCol=v; gCol=t; bCol=p; break;
+                case 1: rCol=q; gCol=v; bCol=p; break;
+                case 2: rCol=p; gCol=v; bCol=t; break;
+                case 3: rCol=p; gCol=q; bCol=v; break;
+                case 4: rCol=t; gCol=p; bCol=v; break;
+                case 5: rCol=v; gCol=p; bCol=q; break;
+            }
+
+            setT(i, x, y, z, rCol, gCol, bCol);
+        }
+    }
+},
+
+            'QUANTUM SPHERE':{
+                desc: 'Particle Cloud with Energy Field',
+                gen: () => {
+                    const r = 18;
+                    for(let i=0; i<PARTICLE_COUNT; i++) {
+                        // Fibonacci Sphere distribution for even coverage
+                        const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+                        const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+                        
+                        // Add "energy field" noise
+                        const noise = 1 + Math.sin(i*0.1) * 0.05;
+                        
+                        setT(i, 
+                            r * Math.cos(theta) * Math.sin(phi) * noise,
+                            r * Math.sin(theta) * Math.sin(phi) * noise,
+                            r * Math.cos(phi) * noise,
+                            0.5, 0.8, 1
+                        );
+                    }
+                }
+            },
+            'SATURN':{
+                desc: 'Spherical Planet & Rings',
+                gen: () => {
+                    for (let i = 0; i < PARTICLE_COUNT; i++) {
+                        if (i < PARTICLE_COUNT * 0.4) {
+                            // Planet Body
+                            const radius = 6;
+                            const phi = Math.acos(-1 + (2 * i) / (PARTICLE_COUNT * 0.4));
+                            const theta = Math.sqrt((PARTICLE_COUNT * 0.4) * Math.PI) * phi;
+                            setT(i, 
+                                radius * Math.cos(theta) * Math.sin(phi),
+                                radius * Math.sin(theta) * Math.sin(phi),
+                                radius * Math.cos(phi),
+                                0.9, 0.8, 0.3
+                            );
+                        } else {
+                            // Rings
+                            const angle = Math.random() * Math.PI * 2;
+                            const innerR = 8;
+                            const outerR = 14;
+                            const rad = innerR + Math.random() * (outerR - innerR);
+                            setT(i, 
+                                rad * Math.cos(angle),
+                                (Math.random() - 0.5) * 0.5, // Thin height
+                                rad * Math.sin(angle),
+                                0.8, 0.8, 0.6
+                            );
+                        }
+                    }
+                }
+            },
+            'GOLDEN GALAXY':{
+                desc: 'Logarithmic Spiral Galaxy',
+                gen: () => {
+                    const arms = 5;
+                    for(let i=0; i<PARTICLE_COUNT; i++) {
+                        // Logarithmic Spiral Math
+                        const armIndex = i % arms;
+                        const randomOffset = Math.random(); 
+                        
+                        // Distance from center (exponential distribution for bright core)
+                        const rad = Math.pow(Math.random(), 2) * 25; 
+                        
+                        // Spiral angle formula
+                        const spin = rad * 0.5; // Tighter spin near center
+                        const armAngle = (Math.PI * 2 / arms) * armIndex;
+                        const theta = spin + armAngle;
+
+                        // Add randomness to width of arms
+                        const spread = (Math.random() - 0.5) * (rad * 0.4); 
+                        
+                        const x = (rad * Math.cos(theta)) + spread;
+                        const z = (rad * Math.sin(theta)) + spread;
+                        // Flattened Y (Disc)
+                        const y = (Math.random() - 0.5) * (10 / (rad+1)); // Thinner at edges
+
+                        setT(i, x, y, z, 1, 0.9, 0.7);
+                    }
+                }
+            },
+     
+            'SUPERMASSIVE BLACK HOLE': {
+                desc: 'Event Horizon & Accretion Disk',
+                gen: () => {
+                    resetIdx();
+                    // 1. Accretion Disk (Flat, hole in middle)
+                    for(let i=0; i<15000; i++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        const dist = 5 + Math.random() * 15; // Hole at r=5
+                        // Keplerian velocity color shift (Red shift/Blue shift look)
+                        const shift = Math.sin(angle); 
+                        
+                        const idx = pIdx*3;
+                        targetPos[idx] = Math.cos(angle)*dist;
+                        targetPos[idx+1] = (Math.random()-0.5) * (dist*0.1); // Thin disk
+                        targetPos[idx+2] = Math.sin(angle)*dist;
+                        
+                        // Hot orange core, darker red edges
+                        targetCol[idx] = 1.0; 
+                        targetCol[idx+1] = 0.5 + (0.4/dist)*5;
+                        targetCol[idx+2] = 0.1;
+                        pIdx++;
+                    }
+                    // 2. Relativistic Jets
+                    for(let i=0; i<5000; i++) {
+                        const h = (Math.random()) * 40;
+                        const side = Math.random()>0.5 ? 1 : -1;
+                        const w = h * 0.20; // Narrow beam
+                        const idx = pIdx*3;
+                        targetPos[idx] = (Math.random()-0.5)*w;
+                        targetPos[idx+1] = h * side + (side*2); // Gap for event horizon
+                        targetPos[idx+2] = (Math.random()-0.5)*w;
+                        // Blue/White energy
+                        targetCol[idx]=0.8; targetCol[idx+1]=0.9; targetCol[idx+2]=1.0;
+                        pIdx++;
+                    }
+                    // 3. Event Horizon (Black Void - we simulate by surrounding with faint purple halo)
+                    addCluster(5000, 0,0,0, 6, 0.1, 0, 0.2); 
+                }
+            },
+            'PULSAR': {
+                desc: 'Rotating Neutron Star',
+                gen: () => {
+                    resetIdx();
+                    // Dense Core
+                    addCluster(3000, 0,0,0, 2, 1, 1, 1);
+                    // Magnetic Field Lines (Toroidal loops)
+                    for(let i=0; i<10000; i++) {
+                        const theta = Math.random() * Math.PI * 2;
+                        const phi = Math.random() * Math.PI * 2;
+                        const r = 8;
+                        const idx = pIdx*3;
+                        // Torus math
+                        targetPos[idx] = (r + 4*Math.cos(theta)) * Math.cos(phi);
+                        targetPos[idx+1] = 4 * Math.sin(theta);
+                        targetPos[idx+2] = (r + 4*Math.cos(theta)) * Math.sin(phi);
+                        targetCol[idx]=0.0; targetCol[idx+1]=0.5; targetCol[idx+2]=1.0; // Cyan
+                        pIdx++;
+                    }
+                    // Beams (Cone shaped)
+                    for(let i=0; i<10000; i++) {
+                        const dist = Math.random() * 100;
+                        const spread = dist * 0.05;
+                        const side = i%2===0 ? 1 : -1;
+                        const idx = pIdx*3;
+                        targetPos[idx] = (Math.random()-0.5)*spread;
+                        targetPos[idx+1] = dist * side;
+                        targetPos[idx+2] = (Math.random()-0.5)*spread;
+                        targetCol[idx]=1.0; targetCol[idx+1]=0.0; targetCol[idx+2]=0.8; // Magenta beams
+                        pIdx++;
+                    }
+                }
+            },
+            'MILKEY WAY GALAXY': {
+                desc: 'Barred Spiral Structure',
+                gen: () => {
+                    resetIdx();
+                    const arms = 4;
+                    // Galactic Bar
+                    for(let i=0; i<5000; i++) {
+                        const idx = pIdx*3;
+                        targetPos[idx] = (Math.random()-0.5) * 15; // Long x
+                        targetPos[idx+1] = (Math.random()-0.5) * 2;
+                        targetPos[idx+2] = (Math.random()-0.5) * 6; // Short z
+                        targetCol[idx]=1.0; targetCol[idx+1]=0.9; targetCol[idx+2]=0.7; // Yellow/White
+                        pIdx++;
+                    }
+                    // Arms
+                    for(let i=0; i<20000; i++) {
+                        const idx = pIdx*3;
+                        const armId = i % arms;
+                        const r = 4 + Math.random() * 30;
+                        const spin = r * 0.3;
+                        const angle = spin + (armId * (Math.PI*2/arms));
+                        const error = (Math.random()-0.5) * (r*0.2); // Spread
+                        
+                        targetPos[idx] = Math.cos(angle)*r + error;
+                        targetPos[idx+1] = (Math.random()-0.5)*(10/(r*0.1)); // Flattened
+                        targetPos[idx+2] = Math.sin(angle)*r + error;
+                        
+                        // Color gradient: Center yellow -> Edge blue
+                        targetCol[idx] = 0.5; 
+                        targetCol[idx+1] = 0.5 + (10/r); 
+                        targetCol[idx+2] = 1.0;
+                        pIdx++;
+                    }
+                }
+            },
+            'HIGGS BOSON DECAY': {
+                desc: 'LHC Collision Event (4 Muons)',
+                gen: () => {
+                    resetIdx();
+                    // 4 Distinct Tracks (Muons)
+                    const tracks = [[1,1,1], [-1,1,-1], [1,-1,-1], [-1,-1,1]];
+                    tracks.forEach(vec => {
+                        for(let k=0; k<1000; k++) {
+                            const dist = k * 0.05;
+                            const spread = 0.5;
+                            const idx = pIdx*3;
+                            targetPos[idx] = vec[0]*dist + (Math.random()-0.5)*spread;
+                            targetPos[idx+1] = vec[1]*dist + (Math.random()-0.5)*spread;
+                            targetPos[idx+2] = vec[2]*dist + (Math.random()-0.5)*spread;
+                            targetCol[idx]=1; targetCol[idx+1]=0; targetCol[idx+2]=0; // Red Tracks
+                            pIdx++;
+                        }
+                    });
+                    // Hadronic Jets (Cones of chaos)
+                    for(let i=0; i<15000; i++) {
+                        const idx = pIdx*3;
+                        const r = Math.random() * 900;
+                        const theta = (Math.random()-0.5) * 0.5; // Narrow cone angle
+                        const phi = Math.random() * Math.PI * 2;
+                        // Orient along X axis roughly
+                        targetPos[idx] = r; 
+                        targetPos[idx+1] = r * Math.sin(theta) * Math.cos(phi);
+                        targetPos[idx+2] = r * Math.sin(theta) * Math.sin(phi);
+                        targetCol[idx]=0.2; targetCol[idx+1]=1.0; targetCol[idx+2]=0.2; // Green energy
+                        pIdx++;
+                    }
+                    // Detector Noise (Sphere)
+                    addCluster(5000, 0,0,0, 40, 0.2, 0.2, 0.2);
+                }
+            },
+            'QUASAR': {
+                desc: 'Active Galactic Nucleus',
+                gen: () => {
+                    resetIdx();
+                    // Massive Core
+                    addCluster(8000, 0,0,0, 5, 1, 1, 1);
+                    // Violent Jets (Longer and messier than black hole)
+                    for(let i=0; i<10000; i++) {
+                        const h = 10 + Math.random() * 80; // Huge
+                        const side = Math.random()>0.5?1:-1;
+                        const spread = h * 0.1;
+                        const idx = pIdx*3;
+                        targetPos[idx] = (Math.random()-0.5)*spread;
+                        targetPos[idx+1] = h*side;
+                        targetPos[idx+2] = (Math.random()-0.5)*spread;
+                        targetCol[idx]=0.7; targetCol[idx+1]=0.8; targetCol[idx+2]=1;
+                        pIdx++;
+                    }
+                    // Turbulent Cloud
+                    addCluster(10000, 0,0,0, 30, 0.5, 0, 0);
+                }
+            },
+            'WORMHOLE': {
+                desc: 'Einstein-Rosen Bridge',
+                gen: () => {
+                    resetIdx();
+                    // Funnel Shape
+                    for(let i=0; i<PARTICLE_COUNT; i++) {
+                        const t = (i/PARTICLE_COUNT) * 2 - 1; // -1 to 1
+                        const u = Math.random() * Math.PI * 2;
+                        // Hyperboloid equation
+                        const r = Math.sqrt(t*t + 0.1) * 15; 
+                        
+                        const idx = pIdx*3;
+                        targetPos[idx] = r * Math.cos(u);
+                        targetPos[idx+1] = t * 80; // Length
+                        targetPos[idx+2] = r * Math.sin(u);
+                        
+                        // Grid color effect
+                        const isGrid = i%100 < 5;
+                        if(isGrid) {
+                            targetCol[idx]=0; targetCol[idx+1]=1; targetCol[idx+2]=0;
+                        } else {
+                            targetCol[idx]=0.1; targetCol[idx+1]=0.1; targetCol[idx+2]=0.3;
+                        }
+                        pIdx++;
+                    }
+                }
+            },
+             'DNA STRAND': {
+                desc: 'Double Helix Structure',
+                gen: () => {
+                    pIdx = 0;
+                    for(let i=0; i<PARTICLE_COUNT; i++) {
+                        const t = (i/PARTICLE_COUNT) * Math.PI * 10;
+                        const side = i%2===0 ? 1 : -1;
+                        const idx = i*3;
+                        targetPos[idx] = Math.cos(t) * 8 * side;
+                        targetPos[idx+1] = (i/PARTICLE_COUNT - 0.5) * 200;
+                        targetPos[idx+2] = Math.sin(t) * 8 * side;
+                        targetCol[idx]=0; targetCol[idx+1]=1; targetCol[idx+2]=0.5;
+                    }
+                }
+            },
+            'NEBULA': {
+                desc: 'Pillars of Creation',
+                gen: () => {
+                    resetIdx();
+                    // 3 Pillars
+                    const pillars = [[-10, -10], [0, 5], [10, -5]];
+                    pillars.forEach(p => {
+                        for(let k=0; k<8000; k++) {
+                            const h = Math.random() * 40;
+                            const w = (40-h) * 0.15 + 2; // Tapering top
+                            const idx = pIdx*3;
+                            if(pIdx>=PARTICLE_COUNT) break;
+                            
+                            targetPos[idx] = p[0] + (Math.random()-0.5)*w;
+                            targetPos[idx+1] = h - 20;
+                            targetPos[idx+2] = p[1] + (Math.random()-0.5)*w;
+                            
+                            // Cosmic Colors (Purple/Pink/Blue)
+                            targetCol[idx] = 0.2 + Math.random()*0.5;
+                            targetCol[idx+1] = 0.1;
+                            targetCol[idx+2] = 0.5 + Math.random()*0.5;
+                            pIdx++;
+                        }
+                    });
+                }
+            }
+        };
+
+        const keys = Object.keys(Patterns);
+        let currentIdx = 0;
+
+        function switchPattern() {
+            currentIdx = (currentIdx + 1) % keys.length;
+            const key = keys[currentIdx];
+            document.getElementById('object-name').innerText = key;
+            document.getElementById('object-desc').innerText = Patterns[key].desc;
+            Patterns[key].gen();
+        }
+
+        // Init First
+        document.getElementById('object-name').innerText = keys[0];
+        document.getElementById('object-desc').innerText = Patterns[keys[0]].desc;
+        Patterns[keys[0]].gen();
+
+        // --- PHYSICS & TRACKING ---
+        let physics = {
+            rotX: 0, rotY: 0,
+            velX: 0, velY: 0,
+            zoom: 1, targetZoom: 1,
+            lastX: 0.5, lastY: 0.5,
+            dragging: false
+        };
+
+        let pinch = { active: false, cooldown: 0 };
+
+ function onResults(res) {
+    document.getElementById('loader').style.display = 'none';
+
+    const lm = res.multiHandLandmarks;
+
+    if (!lm || lm.length === 0) {
+        physics.dragging = false;
+        return;
+    }
+
+    /* =========================
+       HAND 1 — ROTATION CONTROL
+       ========================= */
+    const h1 = lm[0];
+    const x = 1.0 - h1[4].x; // Mirror
+    const y = h1[4].y;
+
+    if (!physics.dragging) {
+        physics.dragging = true;
+        physics.lastX = x;
+        physics.lastY = y;
+    } else {
+        const dx = x - physics.lastX;
+        const dy = y - physics.lastY;
+
+        physics.velY += dx * SENSITIVITY;
+        physics.velX += dy * SENSITIVITY;
+
+        physics.lastX = x;
+        physics.lastY = y;
+    }
+    // Snap Detection (Index + Thumb)
+const tip1 = h1[4]; const tip2 = h1[12]; // Thumb & Index
+const dist = Math.hypot(tip1.x-tip2.x, tip1.y-tip2.y);
+
+const now = Date.now();
+if(dist < 0.05) pinch.active = true;
+else if(pinch.active && dist > 0.15) {
+    // Released
+    if(now - pinch.cooldown > 1000) {
+        switchPattern();
+        pinch.cooldown = now;
+    }
+    pinch.active = false;
+}
+
+
+    /* =========================
+       PINCH — ZOOM CONTROL (Thumb 4 & Index 8)
+       ========================= */
+    const dxPinch = h1[4].x - h1[8].x;
+    const dyPinch = h1[4].y - h1[8].y;
+    const distPinch = Math.sqrt(dxPinch * dxPinch + dyPinch * dyPinch);
+
+    // Tunable pinch values
+    const PINCH_MIN = 0.02; // fingers very close
+    const PINCH_MAX = 0.18; // fingers far apart
+    const ZOOM_MIN  = 0.4;
+    const ZOOM_MAX  = 9.0;
+
+    // Normalize pinch distance
+    let t = (distPinch - PINCH_MIN) / (PINCH_MAX - PINCH_MIN);
+    t = Math.max(0, Math.min(1, t));
+
+    // Invert: pinch-in = zoom-in
+    const targetZoomPinch = ZOOM_MAX - t * (ZOOM_MAX - ZOOM_MIN);
+
+    // Smooth zoom
+    physics.targetZoom += (targetZoomPinch - physics.targetZoom) * 0.12;
+
+    // Clamp final zoom
+    physics.targetZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, physics.targetZoom));
+
+    /* =========================
+       HAND 2 — ADDITIONAL ZOOM
+       ========================= */
+    if (lm.length === 2) {
+        const h2 = lm[1];
+
+        const x2 = 1.0 - h2[9].x; // Palm center
+        const y2 = h2[9].y;
+
+        const d = Math.hypot(x - x2, y - y2);
+
+        const targetZoom2 = 0.5 + d * 3;
+
+        // Smooth two-hand zoom
+        physics.targetZoom += (targetZoom2 - physics.targetZoom) * 0.1;
+
+        // Clamp again
+        physics.targetZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, physics.targetZoom));
+    }
+}
+
+
+        
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6});
+        hands.onResults(onResults);
+
+        const cam = new Camera(document.getElementById('video-input'), {
+            onFrame: async () => { await hands.send({image: document.getElementById('video-input')}); },
+            width: 320, height: 240
+        });
+        cam.start();
+
+        // --- LOOP ---
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+
+            // Physics
+            if(!physics.dragging) {
+                physics.velX *= FRICTION;
+                physics.velY *= FRICTION;
+                // Auto-spin if idle
+                if(Math.abs(physics.velY) < 0.01) physics.velY = 0.0009;
+            } else {
+                physics.velX *= 0.9; physics.velY *= 0.9;
+            }
+            
+            physics.rotY += physics.velY;
+            physics.rotX += physics.velX;
+            physics.zoom += (physics.targetZoom - physics.zoom) * dt * 4;
+
+            universe.rotation.y = physics.rotY;
+            universe.rotation.x = physics.rotX;
+            universe.scale.setScalar(physics.zoom);
+
+            document.getElementById('vel-readout').innerText = (physics.velY*1000).toFixed(0);
+
+            // Particles
+            const speed = 3.0;
+            for(let i=0; i<PARTICLE_COUNT*3; i++) {
+                pos[i] += (targetPos[i] - pos[i]) * speed * dt;
+                col[i] += (targetCol[i] - col[i]) * speed * dt;
+            }
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.onresize = () => {
+            camera.aspect = window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        };
+    </script>
+</body>
+</html>
